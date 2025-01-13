@@ -110,7 +110,7 @@ void initRepository(const std::string &projectName)
         return;
     }
 
-    std::string centralOriginPath = "/usr/bin/codekeeper"; // You can change this path if needed
+    std::string centralOriginPath = "/usr/bin/Codekeeper"; // You can change this path if needed
 
     // Create central origin directory if it doesn't exist
     if (!fs::exists(centralOriginPath))
