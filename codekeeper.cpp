@@ -228,7 +228,7 @@ void initRepository(const std::string &projectName)
 
 std::string loadRepositoryPath()
 {
-    std::string centralConfigFile = "/usr/bin/codekeeper/codekeeper_config";
+    std::string centralConfigFile = "/usr/bin/Codekeeper/codekeeper_config";
     std::ifstream configFile(centralConfigFile);
 
     if (!configFile.is_open())
