@@ -76,7 +76,7 @@ std::string generateGUID()
 // Function to check if the repository has been initialized
 bool isRepositoryInitialized(const std::string &projectName)
 {
-    std::string centralOriginPath = "/usr/bin/codekeeper";    // You can change this path if needed
+    std::string centralOriginPath = "/usr/bin/Codekeeper";    // You can change this path if needed
     std::string keepDirectory = centralOriginPath + "/.keep"; // Path to the .keep directory
     std::string repoName = "." + projectName;
     std::string repositoryPath = keepDirectory + "/" + repoName; // Path to the project folder under .keep
