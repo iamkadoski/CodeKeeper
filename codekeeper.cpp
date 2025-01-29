@@ -1,4 +1,4 @@
-#include <iostream>
+v#include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <string>
@@ -36,6 +36,77 @@ std::string getTimestamp()
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     return buf;
 }
+
+class TreeNode {
+public:
+    std::string name;
+    bool isDirectory;
+    std::vector<TreeNode*> children;
+
+    TreeNode(const std::string& name, bool isDirectory)
+        : name(name), isDirectory(isDirectory) {}
+
+    void AddChild(TreeNode* child) {
+        children.push_back(child);
+    }
+};
+
+class FileTree {
+public:
+    TreeNode* root;
+
+    FileTree(const std::string& rootName) {
+        root = new TreeNode(rootName, true);
+    }
+
+    void AddFile(const std::string& path) {
+        std::vector<std::string> segments = SplitPath(path);
+        TreeNode* currentNode = root;
+
+        for (const std::string& segment : segments) {
+            TreeNode* childNode = FindChild(currentNode, segment);
+            if (childNode == nullptr) {
+                bool isDirectory = segment.find('.') == std::string::npos;
+                childNode = new TreeNode(segment, isDirectory);
+                currentNode->AddChild(childNode);
+            }
+            currentNode = childNode;
+        }
+    }
+
+    void PrintTree(TreeNode* node, int depth = 0) const {
+        std::string indent(depth * 2, ' ');
+        std::cout << indent << (node->isDirectory ? "[DIR] " : "[FILE] ") << node->name << std::endl;
+        for (TreeNode* child : node->children) {
+            PrintTree(child, depth + 1);
+        }
+    }
+
+private:
+    std::vector<std::string> SplitPath(const std::string& path) const {
+        std::vector<std::string> segments;
+        size_t start = 0, end = 0;
+
+        while ((end = path.find('/', start)) != std::string::npos) {
+            segments.push_back(path.substr(start, end - start));
+            start = end + 1;
+        }
+        segments.push_back(path.substr(start));
+        return segments;
+    }
+
+    TreeNode* FindChild(TreeNode* node, const std::string& name) const {
+        for (TreeNode* child : node->children) {
+            if (child->name == name) {
+                return child;
+            }
+        }
+        return nullptr;
+    }
+};
+
+
+
 
 // Function to split a string by delimiter
 std::vector<std::string> splitString(const std::string &str, char delimiter)
@@ -587,90 +658,91 @@ void expandWildcard(const std::string &pattern, std::vector<std::string> &files)
 }
 
 // Function to commit files
-void commitFiles(const std::vector<std::string> &filePaths, const std::string &commitMessage)
-{
+// void commitFiles(const std::vector<std::string> &filePaths, const std::string &commitMessage)
+// {
+//     repositoryPath = loadRepositoryPath();
+
+//     if (repositoryPath.empty())
+//     {
+//         std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
+//         return;
+//     }
+
+//     // Generate a unique GUID for this commit
+//     std::string commitID = generateGUID();
+//     std::cout << "Commit ID: " << commitID << "\n"; // Optional, for debugging
+
+//     // Load ignored files from .bypass
+//     std::ifstream bypassFile(repositoryPath + "/.bypass");
+//     std::vector<std::string> ignoredFiles;
+//     std::string line;
+//     while (std::getline(bypassFile, line))
+//     {
+//         if (!line.empty() && line[0] != '#')
+//         {
+//             ignoredFiles.push_back(line);
+//         }
+//     }
+
+//commit includes file tree
+void commitFiles(const std::vector<std::string>& filePaths, const std::string& commitMessage) {
     repositoryPath = loadRepositoryPath();
 
-    if (repositoryPath.empty())
-    {
+    if (repositoryPath.empty()) {
         std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
         return;
     }
 
-    // Generate a unique GUID for this commit
-    std::string commitID = generateGUID();
-    std::cout << "Commit ID: " << commitID << "\n"; // Optional, for debugging
-
-    // Load ignored files from .bypass
-    std::ifstream bypassFile(repositoryPath + "/.bypass");
-    std::vector<std::string> ignoredFiles;
-    std::string line;
-    while (std::getline(bypassFile, line))
-    {
-        if (!line.empty() && line[0] != '#')
-        {
-            ignoredFiles.push_back(line);
-        }
-    }
-
+    FileTree fileTree("Root");
     std::vector<std::string> allFiles;
-    for (const auto &filePath : filePaths)
-    {
-        if (!fs::exists(filePath))
-        {
+
+    for (const auto& filePath : filePaths) {
+        if (!fs::exists(filePath)) {
             std::cerr << "Error: File or directory " << filePath << " does not exist.\n";
             continue;
         }
 
-        if (fs::is_regular_file(filePath))
-        {
-            if (std::find(ignoredFiles.begin(), ignoredFiles.end(), filePath) == ignoredFiles.end())
-            {
-                allFiles.push_back(filePath);
-            }
-            else
-            {
-                std::cout << "Skipping ignored file: " << filePath << "\n";
-            }
-        }
-        else if (fs::is_directory(filePath))
-        {
-            collectFilesFromDirectory(filePath, allFiles, ignoredFiles);
-        }
-        else
-        {
+        if (fs::is_regular_file(filePath)) {
+            allFiles.push_back(filePath);
+        } else if (fs::is_directory(filePath)) {
+            collectFilesFromDirectory(filePath, allFiles, {});
+        } else {
             std::cerr << "Error: Unsupported file type for " << filePath << ".\n";
         }
     }
 
-    // Commit the collected files
+    std::string commitID = generateGUID();
     std::vector<std::string> versionPaths;
-    for (const auto &filePath : allFiles)
-    {
-        std::string versionFile = repositoryPath + "/.versions/version_" + commitID + "_" + std::to_string(std::time(nullptr)) +
-                                  "_" + fs::path(filePath).filename().string();
+
+    for (const auto& filePath : allFiles) {
+        fileTree.AddFile(filePath);
+        std::string versionFile = repositoryPath + "/.versions/version_" + commitID + "_" +
+                                  std::to_string(std::time(nullptr)) + "_" + fs::path(filePath).filename().string();
         fs::copy(filePath, versionFile, fs::copy_options::overwrite_existing);
         versionPaths.push_back(versionFile);
     }
 
     std::string timestamp = getTimestamp();
     std::ofstream logFile(repositoryPath + "/commit_log.txt", std::ios::app);
-    logFile << commitMessage << "|" << commitID << "|" << timestamp;
 
-    for (const auto &filePath : allFiles)
-    {
+    if (!logFile) {
+        std::cerr << "Error: Could not open commit log file.\n";
+        return;
+    }
+
+    logFile << commitMessage << "|" << commitID << "|" << timestamp;
+    for (const auto& filePath : allFiles) {
         logFile << "|" << filePath;
     }
     logFile << "|";
-
-    for (const auto &versionPath : versionPaths)
-    {
+    for (const auto& versionPath : versionPaths) {
         logFile << versionPath << "|";
     }
-
     logFile << "\n";
     logFile.close();
+
     std::cout << "Files committed successfully with message: " << commitMessage << "\n";
+    fileTree.PrintTree(fileTree.root);
 }
 
 // Function to display help message
@@ -679,7 +751,7 @@ void displayHelp()
     std::cout << "CodeKeeper Help:\n";
     std::cout << "Available Commands:\n";
     std::cout << "  init                 Initialize a new repository.\n";
-    std::cout << "  commit [files]       Commit specified files or directories.\n";
+    std::cout << "  commit <message> [files] Commit specified files or directories.\n";
     std::cout << "                       Use '*.*' or '.' to commit all files.\n";
     std::cout << "  rollback [file|guid] Revert a file or repository to a specific version.\n";
     std::cout << "  history              View commit history.\n";
