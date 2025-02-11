@@ -1,4 +1,4 @@
-v#include <iostream>
+#include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <string>
@@ -145,7 +145,7 @@ std::string generateGUID()
 }
 
 // Function to check if the repository has been initialized
-bool isRepositoryInitialized(const std::string &projectName)
+bool isRepositoryInitialized( std::string &projectName)
 {
     std::string centralOriginPath = "/usr/bin/Codekeeper";    // You can change this path if needed
     std::string keepDirectory = centralOriginPath + "/.keep"; // Path to the .keep directory
@@ -165,18 +165,21 @@ bool isRepositoryInitialized(const std::string &projectName)
     return false; // Repository not initialized
 }
 
-// Function to load the repository path
-void initRepository(const std::string &projectName)
-{
-    if (projectName.empty())
-    {
-        std::cerr << "Error: Project name cannot be empty.\n";
-        return;
+
+
+void initRepository(std::string &projectName) {
+    // Get the current working directory
+    fs::path currentPath = fs::current_path();
+
+    // Extract the directory name
+    const std::string directoryName = currentPath.filename().string();
+
+    if (projectName.empty()) {
+        projectName = directoryName;
     }
 
     // Ensure the application has proper permissions
-    if (getuid() != 0)
-    { // Check if running as root
+    if (getuid() != 0) { // Check if running as root
         std::cerr << "Error: You must run 'codekeeper init' as root to set up the central repository.\n";
         return;
     }
@@ -184,20 +187,16 @@ void initRepository(const std::string &projectName)
     std::string centralOriginPath = "/usr/bin/Codekeeper"; // You can change this path if needed
 
     // Create central origin directory if it doesn't exist
-    if (!fs::exists(centralOriginPath))
-    {
+    if (!fs::exists(centralOriginPath)) {
         fs::create_directories(centralOriginPath);
     }
 
-    std::string centralConfigFile = centralOriginPath + "/codekeeper_config";
-
     std::string repoName = "." + projectName;
-    std::string keepDirectory = centralOriginPath + "/.keep";    // Create the .keep directory within the central origin path
+    std::string keepDirectory = centralOriginPath + "/.keep"; // Create the .keep directory within the central origin path
     std::string repositoryPath = keepDirectory + "/" + repoName; // Place the project folder under .keep
 
     // Create the .keep directory if it doesn't exist
-    if (!fs::exists(keepDirectory))
-    {
+    if (!fs::exists(keepDirectory)) {
         fs::create_directory(keepDirectory);
     }
 
@@ -205,6 +204,16 @@ void initRepository(const std::string &projectName)
     std::ofstream repoFile(keepDirectory + "/projectdetails");
     repoFile << repositoryPath;
     repoFile.close();
+
+    // Create the local configuration file in the project directory
+    std::ofstream localConfigFile(currentPath.string() + "/.codekeeper_config");
+    if (localConfigFile.is_open()) {
+        localConfigFile << "central_repository_path=" << repositoryPath << "\n";
+        localConfigFile.close();
+    } else {
+        std::cerr << "Error: Unable to write to local configuration file.\n";
+        return;
+    }
 
     // Create the ".versions" folder inside the project folder
     fs::create_directories(repositoryPath + "/.versions");
@@ -218,88 +227,17 @@ void initRepository(const std::string &projectName)
     std::ofstream logFile(repositoryPath + "/commit_log.txt");
     logFile.close();
 
-    // Write the central repository path to the global config
-    std::ofstream centralConfig(centralConfigFile);
-    if (centralConfig.is_open())
-    {
-        centralConfig << "central_repository_path=" << repositoryPath << "\n";
-        centralConfig.close();
-    }
-    else
-    {
-        std::cerr << "Error: Unable to write to central configuration file.\n";
-        return;
-    }
-
     std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
-    std::cout << "Central repository configured in '" << centralConfigFile << "'.\n";
+    std::cout << "Local configuration file created in project directory.\n";
 }
 
-// // Function to load the repository path
-// void initRepository(const std::string& projectName) {
-//     if (projectName.empty()) {
-//         std::cerr << "Error: Project name cannot be empty.\n";
-//         return;
-//     }
 
-//     // Ensure the application has proper permissions
-//     if (getuid() != 0) { // Check if running as root
-//         std::cerr << "Error: You must run 'codekeeper init' as root to set up the central repository.\n";
-//         return;
-//     }
-
-//     std::string centralOriginPath = "/usr/bin/codekeeper";  // You can change this path if needed
-
-//     // Create central origin directory if it doesn't exist
-//     if (!fs::exists(centralOriginPath)) {
-//         fs::create_directories(centralOriginPath);
-//     }
-
-//     std::string centralConfigFile = centralOriginPath + "/codekeeper_config";
-
-//     std::string repoName = "." + projectName;
-//     std::string keepDirectory = centralOriginPath + "/.keep";  // Create the .keep directory within the central origin path
-//     std::string repositoryPath = keepDirectory + "/" + repoName;  // Place the project folder under .keep
-
-//     // Create the .keep directory if it doesn't exist
-//     if (!fs::exists(keepDirectory)) {
-//         fs::create_directory(keepDirectory);
-//     }
-
-//     // Create the project details file in the local repo
-//     std::ofstream repoFile(keepDirectory + "/projectdetails");
-//     repoFile << repositoryPath;
-//     repoFile.close();
-
-//     // Create the ".versions" folder inside the project folder
-//     fs::create_directories(repositoryPath + "/.versions");
-
-//     // Create the .bypass file inside the hidden repository
-//     std::ofstream bypassFile(repositoryPath + "/.bypass");
-//     bypassFile << "# Add files or patterns to ignore\n";
-//     bypassFile.close();
-
-//     // Create the commit_log.txt file
-//     std::ofstream logFile(repositoryPath + "/commit_log.txt");
-//     logFile.close();
-
-//     // Write the central repository path to the global config
-//     std::ofstream centralConfig(centralConfigFile);
-//     if (centralConfig.is_open()) {
-//         centralConfig << "central_repository_path=" << repositoryPath << "\n";
-//         centralConfig.close();
-//     } else {
-//         std::cerr << "Error: Unable to write to central configuration file.\n";
-//         return;
-//     }
-
-//     std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
-//     std::cout << "Central repository configured in '" << centralConfigFile << "'.\n";
-// }
 
 std::string loadRepositoryPath()
 {
-    std::string centralConfigFile = "/usr/bin/Codekeeper/codekeeper_config";
+    std::string porojectfilepath = fs::current_path();
+    //std::string centralConfigFile = "/usr/bin/Codekeeper/codekeeper_config";
+    std::string centralConfigFile = porojectfilepath + "/.codekeeper_config";
     std::ifstream configFile(centralConfigFile);
 
     if (!configFile.is_open())
