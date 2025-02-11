@@ -595,32 +595,7 @@ void expandWildcard(const std::string &pattern, std::vector<std::string> &files)
     }
 }
 
-// Function to commit files
-// void commitFiles(const std::vector<std::string> &filePaths, const std::string &commitMessage)
-// {
-//     repositoryPath = loadRepositoryPath();
 
-//     if (repositoryPath.empty())
-//     {
-//         std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
-//         return;
-//     }
-
-//     // Generate a unique GUID for this commit
-//     std::string commitID = generateGUID();
-//     std::cout << "Commit ID: " << commitID << "\n"; // Optional, for debugging
-
-//     // Load ignored files from .bypass
-//     std::ifstream bypassFile(repositoryPath + "/.bypass");
-//     std::vector<std::string> ignoredFiles;
-//     std::string line;
-//     while (std::getline(bypassFile, line))
-//     {
-//         if (!line.empty() && line[0] != '#')
-//         {
-//             ignoredFiles.push_back(line);
-//         }
-//     }
 
 //commit includes file tree
 void commitFiles(const std::vector<std::string>& filePaths, const std::string& commitMessage) {
@@ -694,6 +669,7 @@ void displayHelp()
     std::cout << "  rollback [file|guid] Revert a file or repository to a specific version.\n";
     std::cout << "  history              View commit history.\n";
     std::cout << "  conflicts [file]     Check for conflicts in a file.\n";
+    std::cout << "  convert [directorypath]     Check for conflicts in a file.\n";
     std::cout << "  resolve [file] [res] Resolve a conflict with the specified resolution file.\n";
     std::cout << "  archive              Archive the .versions folder.\n";
     std::cout << "  auth                 Authenticate a user.\n";
@@ -928,6 +904,16 @@ int main(int argc, char *argv[])
         }
         std::string branchName = argv[2];
         createBranch(branchName);
+    }
+    else if (command == "Convert")
+    {
+        if (argc < 3)
+        {
+            std::cerr << "Error: Please provide branch name.\n";
+            return 1;
+        }
+        std::string dirpath = argv[2];
+        convertToGitRepo(dirpath);
     }
     else if (command == "history")
     {
