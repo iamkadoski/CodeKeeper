@@ -669,7 +669,7 @@ void displayHelp()
     std::cout << "  rollback [file|guid] Revert a file or repository to a specific version.\n";
     std::cout << "  history              View commit history.\n";
     std::cout << "  conflicts [file]     Check for conflicts in a file.\n";
-    std::cout << "  convert [directorypath]     Check for conflicts in a file.\n";
+    std::cout << "  convert [directorypath]     Convert directory to a git repo.\n";
     std::cout << "  resolve [file] [res] Resolve a conflict with the specified resolution file.\n";
     std::cout << "  archive              Archive the .versions folder.\n";
     std::cout << "  auth                 Authenticate a user.\n";
