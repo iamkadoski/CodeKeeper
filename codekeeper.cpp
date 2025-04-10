@@ -7,18 +7,15 @@
 #include <sstream>
 #include <iterator>
 #include <algorithm>
-#include <regex>
-#include <sstream>
-#include <random>
-#include <chrono>
+#include <openssl/sha.h>
 #include <iomanip>
-#include <unistd.h> // For getuid()
+#include <cstring>
 
+#include <sys/stat.h>
 namespace fs = std::filesystem;
 
 // Structure to hold metadata for commits
-struct Commit
-{
+struct Commit {
     std::string message;
     std::string timestamp;
     std::vector<std::string> filePaths;
@@ -26,57 +23,299 @@ struct Commit
 };
 
 std::string repositoryPath;
-std::string projectName;
 
 // Function to generate a timestamp
-std::string getTimestamp()
-{
+std::string getTimestamp() {
     std::time_t now = std::time(nullptr);
     char buf[80];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     return buf;
 }
 
-// Function to split a string by delimiter
-std::vector<std::string> splitString(const std::string &str, char delimiter)
+// utility function
+std::vector<std::string> split(const std::string &str, char delimiter)
 {
     std::vector<std::string> tokens;
-    std::istringstream iss(str);
+    std::stringstream ss(str);
     std::string token;
-    while (std::getline(iss, token, delimiter))
+    while (std::getline(ss, token, delimiter))
     {
         tokens.push_back(token);
     }
     return tokens;
 }
 
-std::string generateGUID()
-{
-    // Get the current timestamp
-    auto timestamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-
-    // Generate random components
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dis(0, 15); // For hex characters
-
-    std::stringstream guidStream;
-    guidStream << std::hex << std::setw(8) << std::setfill('0') << (timestamp & 0xFFFFFFFF);
-    guidStream << "-";
-    for (int i = 0; i < 3; ++i)
-    {
-        guidStream << std::setw(4) << std::setfill('0') << dis(gen);
-        guidStream << "-";
+// Function to split a string by delimiter
+std::vector<std::string> splitString(const std::string& str, char delimiter) {
+    std::vector<std::string> tokens;
+    std::istringstream iss(str);
+    std::string token;
+    while (std::getline(iss, token, delimiter)) {
+        tokens.push_back(token);
     }
-    guidStream << std::setw(12) << std::setfill('0') << dis(gen);
-
-    return guidStream.str();
+    return tokens;
 }
+
+bool filesAreEqual(const std::string &filePath1, const std::string &filePath2)
+{
+    std::ifstream file1(filePath1, std::ios::binary);
+    std::ifstream file2(filePath2, std::ios::binary);
+    return std::equal(std::istreambuf_iterator<char>(file1), std::istreambuf_iterator<char>(),
+                      std::istreambuf_iterator<char>(file2));
+}
+
+// Function to load the repository path
+
+// Escape special characters for log safety
+std::string escape(const std::string& input) {
+    std::string output;
+    for (char c : input) {
+        if (c == '|') output += "\\|";
+        else output += c;
+    }
+    return output;
+}
+
+// Function to compute SHA-256 hash of a file (simple implementation)
+#include <openssl/evp.h>
+
+std::string computeFileHash(const fs::path& filePath) {
+    std::ifstream file(filePath, std::ios::binary);
+    if (!file) return "";
+
+    EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+    if (!mdctx) return "";
+
+    const EVP_MD* md = EVP_sha256();
+    if (1 != EVP_DigestInit_ex(mdctx, md, nullptr)) return "";
+
+    char buffer[8192];
+    while (file.good()) {
+        file.read(buffer, sizeof(buffer));
+        if (1 != EVP_DigestUpdate(mdctx, buffer, file.gcount())) return "";
+    }
+
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hashLen = 0;
+    if (1 != EVP_DigestFinal_ex(mdctx, hash, &hashLen)) return "";
+
+    EVP_MD_CTX_free(mdctx);
+
+    std::ostringstream result;
+    for (unsigned int i = 0; i < hashLen; ++i) {
+        result << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+
+    return result.str();
+}
+
+
+// Function to load the repository path
+void loadRepositoryPath() {
+    std::ifstream repoFile(".repo_path");
+    if (repoFile.is_open()) {
+        std::getline(repoFile, repositoryPath);
+        repoFile.close();
+    } else {
+        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
+        repositoryPath.clear();
+    }
+}
+
+// Initialize the repository
+void initRepository(const std::string& projectName) {
+    std::string repoName = projectName.empty() ? fs::current_path().filename().string() : projectName;
+    fs::path baseDir = fs::current_path();
+    fs::path repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename());
+
+    if (!fs::exists(repoPath)) {
+        fs::create_directory(repoPath);
+    }
+
+    repositoryPath = repoPath.string();
+
+    std::ofstream repoFile(".repo_path");
+    repoFile << repositoryPath;
+    repoFile.close();
+
+    fs::create_directory(repoPath / "versions");
+
+    std::ofstream bypassFile(repoPath / ".bypass");
+    bypassFile << "# Add files or patterns to ignore\n";
+    bypassFile.close();
+
+    std::ofstream logFile(repoPath / "commit_log.txt");
+    logFile.close();
+
+    std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
+    std::cout << "Change your terminal to the project folder: cd " << repositoryPath << "\n";
+}
+
+// Function to commit multiple files
+void commitFiles(const std::vector<std::string>& filePaths, const std::string& commitMessage) {
+    loadRepositoryPath();
+    fs::path repoPath = fs::weakly_canonical(repositoryPath);
+    fs::path versionDir = repoPath / "versions";
+
+    if (repositoryPath.empty() || !fs::exists(versionDir)) {
+        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
+        return;
+    }
+
+    std::ifstream bypassFile(repoPath / ".bypass");
+    std::vector<std::string> ignoredFiles;
+    std::string line;
+    while (std::getline(bypassFile, line)) {
+        if (!line.empty() && line[0] != '#') {
+            ignoredFiles.push_back(line);
+        }
+    }
+
+    std::vector<std::string> versionPaths;
+    std::vector<std::string> fileHashes;
+    for (const auto& filePath : filePaths) {
+        fs::path file = fs::absolute(filePath);
+
+        if (!fs::exists(file)) {
+            std::cerr << "Error: File " << file << " does not exist.\n";
+            return;
+        }
+
+        if (std::find(ignoredFiles.begin(), ignoredFiles.end(), filePath) != ignoredFiles.end()) {
+            std::cout << "Skipping ignored file: " << filePath << "\n";
+            continue;
+        }
+
+        std::string versionFile = "version_" + std::to_string(std::time(nullptr)) + "_" + file.filename().string();
+        fs::path versionFilePath = versionDir / versionFile;
+
+        fs::copy(file, versionFilePath, fs::copy_options::overwrite_existing);
+        versionPaths.push_back(versionFilePath.string());
+        fileHashes.push_back(computeFileHash(file));
+    }
+
+    std::string timestamp = getTimestamp();
+    std::ofstream logFile(repoPath / "commit_log.txt", std::ios::app);
+    logFile << escape(commitMessage) << "|" << timestamp;
+
+    for (size_t i = 0; i < filePaths.size(); ++i) {
+        logFile << "|" << escape(fs::absolute(filePaths[i]).string())
+                << "|" << fileHashes[i];
+    }
+
+    logFile << "|";
+
+    for (const auto& versionPath : versionPaths) {
+        logFile << versionPath << "|";
+    }
+
+    logFile << "\n";
+    logFile.close();
+    std::cout << "Files committed successfully with message: " << commitMessage << "\n";
+}
+
+// Function to retrieve files by commit message
+void retrieveFiles(const std::string& commitMessage) {
+    loadRepositoryPath();
+    fs::path repoPath = fs::weakly_canonical(repositoryPath);
+    fs::path logPath = repoPath / "commit_log.txt";
+
+    if (repositoryPath.empty() || !fs::exists(logPath)) {
+        std::cerr << "Error: Repository not initialized or log file missing.\n";
+        return;
+    }
+
+    std::ifstream logFile(logPath);
+    std::string line;
+
+    while (std::getline(logFile, line)) {
+        size_t pos = line.find('|');
+        std::string message = line.substr(0, pos);
+
+        if (message == escape(commitMessage)) {
+            size_t pos2 = line.find('|', pos + 1);
+            size_t pos3 = line.find_last_of('|');
+            std::string fileData = line.substr(pos2 + 1, pos3 - pos2 - 1);
+            std::vector<std::string> tokens = splitString(fileData, '|');
+            std::vector<std::string> originalPaths, hashes;
+
+            for (size_t i = 0; i + 1 < tokens.size(); i += 2) {
+                originalPaths.push_back(tokens[i]);
+                hashes.push_back(tokens[i + 1]);
+            }
+
+            size_t half = tokens.size() / 2;
+            for (size_t i = 0; i < originalPaths.size(); ++i) {
+                fs::path dest = fs::current_path() / fs::path(originalPaths[i]).filename();
+                fs::copy(tokens[half + i * 2], dest, fs::copy_options::overwrite_existing);
+            }
+
+            std::cout << "Files retrieved successfully.\n";
+            return;
+        }
+    }
+
+    std::cerr << "Error: Commit message not found.\n";
+}
+
+// Function for Rollback
+void rollback(const std::string &target, const std::string &commitGUID = "")
+{
+    loadRepositoryPath();
+
+    if (repositoryPath.empty())
+    {
+        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
+        return;
+    }
+
+    std::ifstream logFile(repositoryPath + "/commit_log.txt");
+    if (!logFile.is_open())
+    {
+        std::cerr << "Error: Commit log file not found.\n";
+        return;
+    }
+
+    std::string line, foundVersionPath;
+    while (std::getline(logFile, line))
+    {
+        std::vector<std::string> tokens = split(line, '|');
+        if (tokens.size() < 4)
+            continue;
+
+        if ((!commitGUID.empty() && tokens[0] == commitGUID) ||
+            (commitGUID.empty() && std::find(tokens.begin() + 3, tokens.end(), target) != tokens.end()))
+        {
+            // Found matching commit or file
+            size_t versionIndex = 3 + (tokens.size() - 3) / 2;
+            for (size_t i = versionIndex; i < tokens.size(); ++i)
+            {
+                if (fs::path(tokens[i]).filename() == fs::path(target).filename())
+                {
+                    foundVersionPath = tokens[i];
+                    break;
+                }
+            }
+        }
+    }
+
+    if (foundVersionPath.empty())
+    {
+        std::cerr << "Error: No matching commit or version found for " << target << ".\n";
+        return;
+    }
+
+    fs::copy(foundVersionPath, target, fs::copy_options::overwrite_existing);
+    std::cout << "Rolled back " << target << " to version: " << foundVersionPath << "\n";
+}
+
+
+
 
 // Function to check if the repository has been initialized
 bool isRepositoryInitialized(const std::string &projectName)
 {
-    std::string centralOriginPath = "/usr/bin/Codekeeper";    // You can change this path if needed
+    std::string centralOriginPath = "/usr/bin/codekeeper";    // You can change this path if needed
     std::string keepDirectory = centralOriginPath + "/.keep"; // Path to the .keep directory
     std::string repoName = "." + projectName;
     std::string repositoryPath = keepDirectory + "/" + repoName; // Path to the project folder under .keep
@@ -94,255 +333,38 @@ bool isRepositoryInitialized(const std::string &projectName)
     return false; // Repository not initialized
 }
 
-// Function to load the repository path
-void initRepository(const std::string &projectName)
+// Function to create a new branch
+void createBranch(const std::string &branchName)
 {
-    if (projectName.empty())
-    {
-        std::cerr << "Error: Project name cannot be empty.\n";
-        return;
-    }
-
-    // Ensure the application has proper permissions
-    if (getuid() != 0)
-    { // Check if running as root
-        std::cerr << "Error: You must run 'codekeeper init' as root to set up the central repository.\n";
-        return;
-    }
-
-    std::string centralOriginPath = "/usr/bin/Codekeeper"; // You can change this path if needed
-
-    // Create central origin directory if it doesn't exist
-    if (!fs::exists(centralOriginPath))
-    {
-        fs::create_directories(centralOriginPath);
-    }
-
-    std::string centralConfigFile = centralOriginPath + "/codekeeper_config";
-
-    std::string repoName = "." + projectName;
-    std::string keepDirectory = centralOriginPath + "/.keep";    // Create the .keep directory within the central origin path
-    std::string repositoryPath = keepDirectory + "/" + repoName; // Place the project folder under .keep
-
-    // Create the .keep directory if it doesn't exist
-    if (!fs::exists(keepDirectory))
-    {
-        fs::create_directory(keepDirectory);
-    }
-
-    // Create the project details file in the local repo
-    std::ofstream repoFile(keepDirectory + "/projectdetails");
-    repoFile << repositoryPath;
-    repoFile.close();
-
-    // Create the ".versions" folder inside the project folder
-    fs::create_directories(repositoryPath + "/.versions");
-
-    // Create the .bypass file inside the hidden repository
-    std::ofstream bypassFile(repositoryPath + "/.bypass");
-    bypassFile << "# Add files or patterns to ignore\n";
-    bypassFile.close();
-
-    // Create the commit_log.txt file
-    std::ofstream logFile(repositoryPath + "/commit_log.txt");
-    logFile.close();
-
-    // Write the central repository path to the global config
-    std::ofstream centralConfig(centralConfigFile);
-    if (centralConfig.is_open())
-    {
-        centralConfig << "central_repository_path=" << repositoryPath << "\n";
-        centralConfig.close();
-    }
-    else
-    {
-        std::cerr << "Error: Unable to write to central configuration file.\n";
-        return;
-    }
-
-    std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
-    std::cout << "Central repository configured in '" << centralConfigFile << "'.\n";
-}
-
-// // Function to load the repository path
-// void initRepository(const std::string& projectName) {
-//     if (projectName.empty()) {
-//         std::cerr << "Error: Project name cannot be empty.\n";
-//         return;
-//     }
-
-//     // Ensure the application has proper permissions
-//     if (getuid() != 0) { // Check if running as root
-//         std::cerr << "Error: You must run 'codekeeper init' as root to set up the central repository.\n";
-//         return;
-//     }
-
-//     std::string centralOriginPath = "/usr/bin/codekeeper";  // You can change this path if needed
-
-//     // Create central origin directory if it doesn't exist
-//     if (!fs::exists(centralOriginPath)) {
-//         fs::create_directories(centralOriginPath);
-//     }
-
-//     std::string centralConfigFile = centralOriginPath + "/codekeeper_config";
-
-//     std::string repoName = "." + projectName;
-//     std::string keepDirectory = centralOriginPath + "/.keep";  // Create the .keep directory within the central origin path
-//     std::string repositoryPath = keepDirectory + "/" + repoName;  // Place the project folder under .keep
-
-//     // Create the .keep directory if it doesn't exist
-//     if (!fs::exists(keepDirectory)) {
-//         fs::create_directory(keepDirectory);
-//     }
-
-//     // Create the project details file in the local repo
-//     std::ofstream repoFile(keepDirectory + "/projectdetails");
-//     repoFile << repositoryPath;
-//     repoFile.close();
-
-//     // Create the ".versions" folder inside the project folder
-//     fs::create_directories(repositoryPath + "/.versions");
-
-//     // Create the .bypass file inside the hidden repository
-//     std::ofstream bypassFile(repositoryPath + "/.bypass");
-//     bypassFile << "# Add files or patterns to ignore\n";
-//     bypassFile.close();
-
-//     // Create the commit_log.txt file
-//     std::ofstream logFile(repositoryPath + "/commit_log.txt");
-//     logFile.close();
-
-//     // Write the central repository path to the global config
-//     std::ofstream centralConfig(centralConfigFile);
-//     if (centralConfig.is_open()) {
-//         centralConfig << "central_repository_path=" << repositoryPath << "\n";
-//         centralConfig.close();
-//     } else {
-//         std::cerr << "Error: Unable to write to central configuration file.\n";
-//         return;
-//     }
-
-//     std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
-//     std::cout << "Central repository configured in '" << centralConfigFile << "'.\n";
-// }
-
-std::string loadRepositoryPath()
-{
-    std::string centralConfigFile = "/usr/bin/Codekeeper/codekeeper_config";
-    std::ifstream configFile(centralConfigFile);
-
-    if (!configFile.is_open())
-    {
-        std::cerr << "Error: Central configuration file not found. Run 'codekeeper init'.\n";
-        return "";
-    }
-
-    std::string line, repositoryPath;
-    while (std::getline(configFile, line))
-    {
-        if (line.find("central_repository_path=") == 0)
-        {
-            repositoryPath = line.substr(line.find('=') + 1);
-            break;
-        }
-    }
-
     if (repositoryPath.empty())
     {
-        std::cerr << "Error: Central repository path not set in the configuration file.\n";
-    }
-
-    return repositoryPath;
-}
-
-std::string getCentralRepositoryPath()
-{
-    std::ifstream configFile(".codekeeper_config");
-    std::string repositoryPath;
-    if (configFile.is_open())
-    {
-        std::getline(configFile, repositoryPath);
-    }
-    return repositoryPath;
-}
-
-void setCentralRepositoryPath(const std::string &path)
-{
-    std::ofstream configFile(".codekeeper_config");
-    configFile << path;
-}
-
-// Function to retrieve files by commit message
-void retrieveFiles(const std::string &commitMessage)
-{
-    if (repositoryPath.empty() || !fs::exists(repositoryPath + "/commit_log.txt"))
-    {
-        std::cerr << "Error: Repository not initialized or log file missing.\n";
-        return;
-    }
-
-    std::ifstream logFile(repositoryPath + "/commit_log.txt");
-    if (!logFile)
-    {
-        std::cerr << "Error: Commit log file not found.\n";
-        return;
-    }
-
-    std::string line;
-    while (std::getline(logFile, line))
-    {
-        size_t pos = line.find('|');
-        std::string message = line.substr(0, pos);
-
-        if (message == commitMessage)
+       loadRepositoryPath();
+        if (repositoryPath.empty())
         {
-            size_t pos2 = line.find('|', pos + 1);
-            size_t pos3 = line.find_last_of('|');
-            std::string fileData = line.substr(pos2 + 1, pos3 - pos2 - 1);
-            std::vector<std::string> tokens = splitString(fileData, '|');
-            size_t half = tokens.size() / 2;
-
-            for (size_t i = 0; i < half; ++i)
-            {
-                fs::copy(tokens[half + i], fs::path(tokens[i]).filename(),
-                         fs::copy_options::overwrite_existing);
-            }
-
-            std::cout << "Files retrieved successfully.\n";
-            logFile.close();
             return;
         }
     }
 
-    std::cerr << "Error: Commit message not found.\n";
-    logFile.close();
-}
-
-// utility function
-std::vector<std::string> split(const std::string &str, char delimiter)
-{
-    std::vector<std::string> tokens;
-    std::stringstream ss(str);
-    std::string token;
-    while (std::getline(ss, token, delimiter))
+    std::string branchesPath = repositoryPath + "/branches";
+    if (!fs::exists(branchesPath))
     {
-        tokens.push_back(token);
+        fs::create_directory(branchesPath);
     }
-    return tokens;
-}
 
-bool filesAreEqual(const std::string &filePath1, const std::string &filePath2)
-{
-    std::ifstream file1(filePath1, std::ios::binary);
-    std::ifstream file2(filePath2, std::ios::binary);
-    return std::equal(std::istreambuf_iterator<char>(file1), std::istreambuf_iterator<char>(),
-                      std::istreambuf_iterator<char>(file2));
-}
+    std::string branchPath = branchesPath + "/" + branchName;
+    if (fs::exists(branchPath))
+    {
+        std::cerr << "Error: Branch '" << branchName << "' already exists.\n";
+        return;
+    }
 
+    fs::create_directory(branchPath);
+    std::cout << "Branch '" << branchName << "' created successfully.\n";
+}
 // function to View History
 void viewHistory()
 {
-    repositoryPath = loadRepositoryPath();
+    loadRepositoryPath();
 
     if (repositoryPath.empty())
     {
@@ -383,7 +405,7 @@ void viewHistory()
 // function for Conflict resolution
 bool checkConflicts(const std::string &filePath)
 {
-    repositoryPath = loadRepositoryPath();
+     loadRepositoryPath();
 
     if (repositoryPath.empty())
     {
@@ -436,334 +458,6 @@ void resolveConflict(const std::string &filePath, const std::string &resolutionP
     std::cout << "Conflict resolved for " << filePath << " using " << resolutionPath << "\n";
 }
 
-// function foir archiving
-
-void archiveVersions()
-{
-    repositoryPath = loadRepositoryPath();
-
-    if (repositoryPath.empty())
-    {
-        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
-        return;
-    }
-
-    std::string versionsPath = repositoryPath + "/.versions";
-    if (!fs::exists(versionsPath))
-    {
-        std::cerr << "Error: No .versions folder found.\n";
-        return;
-    }
-
-    std::string archivePath = repositoryPath + "/.versions_archive_" + getTimestamp() + ".zip";
-
-    // Use a system call to zip the .versions folder (requires zip utility installed)
-    std::string command = "zip -r " + archivePath + " " + versionsPath;
-    if (system(command.c_str()) == 0)
-    {
-        std::cout << "Archived .versions to " << archivePath << "\n";
-    }
-    else
-    {
-        std::cerr << "Error: Failed to archive .versions folder.\n";
-    }
-}
-
-// Function for Rollback
-void rollback(const std::string &target, const std::string &commitGUID = "")
-{
-    repositoryPath = loadRepositoryPath();
-
-    if (repositoryPath.empty())
-    {
-        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
-        return;
-    }
-
-    std::ifstream logFile(repositoryPath + "/commit_log.txt");
-    if (!logFile.is_open())
-    {
-        std::cerr << "Error: Commit log file not found.\n";
-        return;
-    }
-
-    std::string line, foundVersionPath;
-    while (std::getline(logFile, line))
-    {
-        std::vector<std::string> tokens = split(line, '|');
-        if (tokens.size() < 4)
-            continue;
-
-        if ((!commitGUID.empty() && tokens[0] == commitGUID) ||
-            (commitGUID.empty() && std::find(tokens.begin() + 3, tokens.end(), target) != tokens.end()))
-        {
-            // Found matching commit or file
-            size_t versionIndex = 3 + (tokens.size() - 3) / 2;
-            for (size_t i = versionIndex; i < tokens.size(); ++i)
-            {
-                if (fs::path(tokens[i]).filename() == fs::path(target).filename())
-                {
-                    foundVersionPath = tokens[i];
-                    break;
-                }
-            }
-        }
-    }
-
-    if (foundVersionPath.empty())
-    {
-        std::cerr << "Error: No matching commit or version found for " << target << ".\n";
-        return;
-    }
-
-    fs::copy(foundVersionPath, target, fs::copy_options::overwrite_existing);
-    std::cout << "Rolled back " << target << " to version: " << foundVersionPath << "\n";
-}
-
-// Function to create a new branch
-void createBranch(const std::string &branchName)
-{
-    if (repositoryPath.empty())
-    {
-        repositoryPath = loadRepositoryPath();
-        if (repositoryPath.empty())
-        {
-            return;
-        }
-    }
-
-    std::string branchesPath = repositoryPath + "/branches";
-    if (!fs::exists(branchesPath))
-    {
-        fs::create_directory(branchesPath);
-    }
-
-    std::string branchPath = branchesPath + "/" + branchName;
-    if (fs::exists(branchPath))
-    {
-        std::cerr << "Error: Branch '" << branchName << "' already exists.\n";
-        return;
-    }
-
-    fs::create_directory(branchPath);
-    std::cout << "Branch '" << branchName << "' created successfully.\n";
-}
-
-// Function to collect all files from a directory
-void collectFilesFromDirectory(const std::string &dirPath, std::vector<std::string> &files, const std::vector<std::string> &ignoredFiles)
-{
-    for (const auto &entry : std::filesystem::recursive_directory_iterator(dirPath))
-    {
-        if (entry.is_regular_file())
-        {
-            std::string filePath = entry.path().string();
-            if (std::find(ignoredFiles.begin(), ignoredFiles.end(), filePath) == ignoredFiles.end())
-            {
-                files.push_back(filePath);
-            }
-            else
-            {
-                std::cout << "Skipping ignored file: " << filePath << "\n";
-            }
-        }
-    }
-}
-
-// Function to expand wildcards for files and directories
-void expandWildcard(const std::string &pattern, std::vector<std::string> &files)
-{
-    std::regex re(pattern);
-    for (const auto &entry : std::filesystem::directory_iterator("."))
-    {
-        if (std::filesystem::is_regular_file(entry) || std::filesystem::is_directory(entry))
-        {
-            std::string entryPath = entry.path().string();
-            if (std::regex_match(entryPath, re))
-            {
-                files.push_back(entryPath);
-            }
-        }
-    }
-}
-
-// Function to commit files
-void commitFiles(const std::vector<std::string> &filePaths, const std::string &commitMessage)
-{
-    repositoryPath = loadRepositoryPath();
-
-    if (repositoryPath.empty())
-    {
-        std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
-        return;
-    }
-
-    // Generate a unique GUID for this commit
-    std::string commitID = generateGUID();
-    std::cout << "Commit ID: " << commitID << "\n"; // Optional, for debugging
-
-    // Load ignored files from .bypass
-    std::ifstream bypassFile(repositoryPath + "/.bypass");
-    std::vector<std::string> ignoredFiles;
-    std::string line;
-    while (std::getline(bypassFile, line))
-    {
-        if (!line.empty() && line[0] != '#')
-        {
-            ignoredFiles.push_back(line);
-        }
-    }
-
-    std::vector<std::string> allFiles;
-    for (const auto &filePath : filePaths)
-    {
-        if (!fs::exists(filePath))
-        {
-            std::cerr << "Error: File or directory " << filePath << " does not exist.\n";
-            continue;
-        }
-
-        if (fs::is_regular_file(filePath))
-        {
-            if (std::find(ignoredFiles.begin(), ignoredFiles.end(), filePath) == ignoredFiles.end())
-            {
-                allFiles.push_back(filePath);
-            }
-            else
-            {
-                std::cout << "Skipping ignored file: " << filePath << "\n";
-            }
-        }
-        else if (fs::is_directory(filePath))
-        {
-            collectFilesFromDirectory(filePath, allFiles, ignoredFiles);
-        }
-        else
-        {
-            std::cerr << "Error: Unsupported file type for " << filePath << ".\n";
-        }
-    }
-
-    // Commit the collected files
-    std::vector<std::string> versionPaths;
-    for (const auto &filePath : allFiles)
-    {
-        std::string versionFile = repositoryPath + "/.versions/version_" + commitID + "_" + std::to_string(std::time(nullptr)) +
-                                  "_" + fs::path(filePath).filename().string();
-        fs::copy(filePath, versionFile, fs::copy_options::overwrite_existing);
-        versionPaths.push_back(versionFile);
-    }
-
-    std::string timestamp = getTimestamp();
-    std::ofstream logFile(repositoryPath + "/commit_log.txt", std::ios::app);
-    logFile << commitMessage << "|" << commitID << "|" << timestamp;
-
-    for (const auto &filePath : allFiles)
-    {
-        logFile << "|" << filePath;
-    }
-    logFile << "|";
-
-    for (const auto &versionPath : versionPaths)
-    {
-        logFile << versionPath << "|";
-    }
-
-    logFile << "\n";
-    logFile.close();
-    std::cout << "Files committed successfully with message: " << commitMessage << "\n";
-}
-
-// Function to display help message
-void displayHelp()
-{
-    std::cout << "CodeKeeper Help:\n";
-    std::cout << "Available Commands:\n";
-    std::cout << "  init                 Initialize a new repository.\n";
-    std::cout << "  commit [files]       Commit specified files or directories.\n";
-    std::cout << "                       Use '*.*' or '.' to commit all files.\n";
-    std::cout << "  rollback [file|guid] Revert a file or repository to a specific version.\n";
-    std::cout << "  history              View commit history.\n";
-    std::cout << "  conflicts [file]     Check for conflicts in a file.\n";
-    std::cout << "  resolve [file] [res] Resolve a conflict with the specified resolution file.\n";
-    std::cout << "  archive              Archive the .versions folder.\n";
-    std::cout << "  auth                 Authenticate a user.\n";
-    std::cout << "  merge [branch1 branch2] Merge changes from two branches.\n";
-    std::cout << "\nAuthentication:\n";
-    std::cout << "  Users must authenticate using a valid username and password.\n";
-    std::cout << "  Only authenticated users can commit, rollback, or resolve conflicts.\n";
-    std::cout << "\nFor more details, consult the documentation.\n";
-}
-
-// merging files
-void mergeFiles(const std::string &file1, const std::string &file2, const std::string &outputPath)
-{
-    std::ifstream input1(file1);
-    std::ifstream input2(file2);
-    std::ofstream output(outputPath);
-
-    if (!input1.is_open() || !input2.is_open() || !output.is_open())
-    {
-        std::cerr << "Error: Unable to open one or more files for merging.\n";
-        return;
-    }
-
-    std::string line1, line2;
-    while (std::getline(input1, line1) || std::getline(input2, line2))
-    {
-        if (!line1.empty() && !line2.empty() && line1 != line2)
-        {
-            // Conflict: Append both lines with markers
-            output << "<<<<<<< " << file1 << "\n"
-                   << line1 << "\n=======\n"
-                   << line2 << "\n>>>>>>>\n";
-        }
-        else
-        {
-            // No conflict: Append whichever line is available
-            output << (!line1.empty() ? line1 : line2) << "\n";
-        }
-        line1.clear();
-        line2.clear();
-    }
-
-    input1.close();
-    input2.close();
-    output.close();
-    std::cout << "Merge complete. Output written to: " << outputPath << "\n";
-}
-
-// merging branches
-void mergeBranches(const std::string &branch1, const std::string &branch2)
-{
-    repositoryPath = getCentralRepositoryPath();
-
-    if (repositoryPath.empty())
-    {
-        std::cerr << "Error: Central repository not configured.\n";
-        return;
-    }
-
-    std::string branch1Path = repositoryPath + "/branches/" + branch1;
-    std::string branch2Path = repositoryPath + "/branches/" + branch2;
-
-    if (!fs::exists(branch1Path) || !fs::exists(branch2Path))
-    {
-        std::cerr << "Error: One or both branches do not exist.\n";
-        return;
-    }
-
-    for (const auto &entry : fs::directory_iterator(branch1Path))
-    {
-        std::string file1 = entry.path();
-        std::string file2 = branch2Path + "/" + fs::path(file1).filename().string();
-        if (fs::exists(file2))
-        {
-            std::string outputFile = branch1Path + "/merged_" + fs::path(file1).filename().string();
-            mergeFiles(file1, file2, outputFile);
-        }
-    }
-    std::cout << "Branch merge complete. Resolve conflicts in the merged files if necessary.\n";
-}
 
 void moveToGitRepo(const std::string &folderPath, const std::string &repoPath)
 {
@@ -850,6 +544,27 @@ void convertToGitRepo(const std::string &folderPath)
     }
 }
 
+// Function to display help message
+void displayHelp()
+{
+    std::cout << "CodeKeeper Help:\n";
+    std::cout << "Available Commands:\n";
+    std::cout << "  init                 Initialize a new repository.\n";
+    std::cout << "  commit [files]       Commit specified files or directories.\n";
+    std::cout << "                       Use '*.*' or '.' to commit all files.\n";
+    std::cout << "  rollback [file|guid] Revert a file or repository to a specific version.\n";
+    std::cout << "  history              View commit history.\n";
+    std::cout << "  conflicts [file]     Check for conflicts in a file.\n";
+    std::cout << "  resolve [file] [res] Resolve a conflict with the specified resolution file.\n";
+    std::cout << "  archive              Archive the .versions folder.\n";
+    std::cout << "  auth                 Authenticate a user.\n";
+    std::cout << "  merge [branch1 branch2] Merge changes from two branches.\n";
+    std::cout << "\nAuthentication:\n";
+    std::cout << "  Users must authenticate using a valid username and password.\n";
+    std::cout << "  Only authenticated users can commit, rollback, or resolve conflicts.\n";
+    std::cout << "\nFor more details, consult the documentation.\n";
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -923,11 +638,6 @@ int main(int argc, char *argv[])
     {
 
         viewHistory();
-    }
-     else if (command == "archive")
-    {
-
-       archiveVersions();
     }
     else if (command == "conflicts")
     {
