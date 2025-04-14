@@ -56,7 +56,7 @@ and tracking changes. CodeKeeper is designed to operate with a central repositor
 
 2. Compile the application:
    ```bash
-   g++ -std=c++17 -o codekeeper codekeeper.cpp
+   g++ -std=c++17 -o ./build/codekeeper codekeeper.cpp -lssl -lcrypto
    ```
 
 3. Move the compiled binary to a directory in your PATH (e.g., `/usr/local/bin`):
