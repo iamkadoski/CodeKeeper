@@ -59,9 +59,11 @@ and tracking changes. CodeKeeper is designed to operate with a central repositor
    g++ -std=c++17 -o ./build/codekeeper codekeeper.cpp -lssl -lcrypto
    ```
 
-3. Move the compiled binary to a directory in your PATH (e.g., `/usr/local/bin`):
+3. Run install.sh file for installation, the shell script will create the necessary folders and move the application to the required folder:
    ```bash
-   sudo mv codekeeper /usr/local/bin/
+   sudo chmod +x install.sh
+
+   ./install.sh
    ```
 
 ---
