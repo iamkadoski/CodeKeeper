@@ -242,16 +242,6 @@ cd /var/lib/CodeKeeper/<projectName>
 
 ---
 
-## License
-MIT License (see LICENSE file if present)
-
----
-
-## Authors
-- CodeKeeper Team / admin1
-
----
-
 ## Notes
 - This project is for educational and internal use. Not a drop-in replacement for Git.
 - For advanced usage, see comments in `codekeeper.cpp` and the help command (`./codekeeper`).
