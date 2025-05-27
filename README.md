@@ -38,6 +38,20 @@ and tracking changes. CodeKeeper is designed to operate with a central repositor
 
 ---
 
+## Help Menu Explanined
+
+- **SHA-256 Commit IDs:** Every commit is uniquely identified and tamper-evident.
+- **Branching:** Create and switch between branches for parallel development.
+- **Staging Area:** Add/reset files before committing, similar to `git add`/`git reset`.
+- **Status Command:** View staged, modified, and untracked files.
+- **Authentication:** User registration, login, logout, and enforcement for protected actions.
+- **Remote Support:** Set a remote repository, push and pull commits and versions.
+- **Hooks:** Pre-commit and post-commit hooks for automation.
+- **Merge & Conflict Resolution:** Merge files/branches, interactive/manual conflict resolution, and conflict listing.
+- **User Management:** List users, show current user (`whoami`).
+- **Robust Initialization:** Secure repo setup, including user file permissions.
+
+
 ## Installation
 
 ### Prerequisites
@@ -122,6 +136,127 @@ codekeeper --help
    ```bash
    codekeeper archive
    ```
+
+## Quick Start
+
+### 1. Build
+
+Requires C++17, OpenSSL, and Linux (tested on Ubuntu):
+
+```bash
+sudo apt-get install libssl-dev
+# Compile
+ g++ -std=c++17 -o codekeeper codekeeper.cpp -lssl -lcrypto
+```
+
+### 2. Post-Install Setup (as root/admin)
+
+```bash
+sudo bash codekeeper-postinstall.sh
+```
+This creates `/var/lib/CodeKeeper` and a skeleton repo structure.
+
+### 3. Initialize a Repository
+
+```bash
+./codekeeper init <projectName>
+cd /var/lib/CodeKeeper/<projectName>
+```
+
+### 4. User Registration & Authentication
+
+```bash
+./codekeeper auth register <username> <password>
+./codekeeper auth login <username> <password>
+```
+
+### 5. Basic Workflow
+
+```bash
+# Add files to staging
+./codekeeper add file1.cpp file2.cpp
+
+# Check status
+./codekeeper status
+
+# Commit staged files
+./codekeeper commit "Initial commit" file1.cpp file2.cpp
+
+# View history
+./codekeeper history
+```
+
+---
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `init <projectName>` | Initialize a new repository |
+| `add <files>` | Add files to staging area |
+| `reset <files>` | Remove files from staging area |
+| `status` | Show status of working directory and staging area |
+| `commit <message> <files>` | Commit specified files (if staging is empty) |
+| `rollback <target> [commitGUID]` | Revert a file or repo to a specific version |
+| `history` | View commit history |
+| `conflicts <file>` | Check for conflicts in a file |
+| `resolve <file> <resolutionFile>` | Resolve a conflict |
+| `archive` | Archive the `.versions` folder |
+| `auth register <user> <pass>` | Register a new user |
+| `auth login <user> <pass>` | Login as a user |
+| `auth logout` | Logout current user |
+| `merge <branch1> <branch2>` | Merge two branches |
+| `switch <branch>` | Switch to a branch |
+| `set-remote <path>` | Set remote repository path |
+| `push` | Push commits/versions to remote |
+| `pull` | Pull commits/versions from remote |
+| `list-conflicts` | List all files with conflicts |
+| `whoami` | Show current authenticated user |
+| `list-users` | List all registered users |
+| `merge-files <f1> <f2> <out> [--interactive]` | Merge two files (optionally interactively) |
+
+---
+
+## Hooks
+- Place executable `.pre-commit` and `.post-commit` scripts in the repo root to run before/after each commit.
+
+---
+
+## Security & Permissions
+- The `.users` file is created with mode 600 (owner read/write only).
+- Only authenticated users can commit, rollback, or resolve conflicts.
+- Session state is stored in `.session` in the repo root.
+
+---
+
+## Remote Repository
+- Use `set-remote <path>` to configure a remote CodeKeeper repo.
+- `push` and `pull` sync commits and versioned files.
+
+---
+
+## Troubleshooting
+- If you see `Error: You must authenticate first`, run `auth login`.
+- If registration fails, ensure the `.users` file exists and is writable.
+- For OpenSSL errors, ensure `libssl-dev` is installed and linked.
+
+---
+
+## License
+MIT License (see LICENSE file if present)
+
+---
+
+## Authors
+- CodeKeeper Team / admin1
+
+---
+
+## Notes
+- This project is for educational and internal use. Not a drop-in replacement for Git.
+- For advanced usage, see comments in `codekeeper.cpp` and the help command (`./codekeeper`).
+
+
 
 ---
 
