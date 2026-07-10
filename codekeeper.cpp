@@ -13,6 +13,8 @@
 #include <regex>
 #include <openssl/evp.h>
 #include <set>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include <sys/stat.h>
 namespace fs = std::filesystem;
@@ -48,15 +50,16 @@ std::vector<std::string> split(const std::string &str, char delimiter)
     return tokens;
 }
 
-// Function to split a string by delimiter
-std::vector<std::string> splitString(const std::string& str, char delimiter) {
-    std::vector<std::string> tokens;
-    std::istringstream iss(str);
-    std::string token;
-    while (std::getline(iss, token, delimiter)) {
-        tokens.push_back(token);
+// Ensure a file path is within the repository (prevents path traversal)
+bool isPathSafe(const std::string& filePath) {
+    try {
+        fs::path resolved = fs::weakly_canonical(fs::absolute(filePath));
+        fs::path repo = fs::weakly_canonical(fs::absolute(repositoryPath));
+        auto rel = fs::relative(resolved, repo);
+        return !rel.empty() && rel.string().find("..") == std::string::npos;
+    } catch (...) {
+        return false;
     }
-    return tokens;
 }
 
 bool filesAreEqual(const std::string &filePath1, const std::string &filePath2)
@@ -110,17 +113,17 @@ std::string computeFileHash(const fs::path& filePath)
     if (!mdctx) return "";
 
     const EVP_MD* md = EVP_sha256();
-    if (1 != EVP_DigestInit_ex(mdctx, md, nullptr)) return "";
+    if (1 != EVP_DigestInit_ex(mdctx, md, nullptr)) { EVP_MD_CTX_free(mdctx); return ""; }
 
     char buffer[8192];
     while (file.good()) {
         file.read(buffer, sizeof(buffer));
-        if (1 != EVP_DigestUpdate(mdctx, buffer, file.gcount())) return "";
+        if (1 != EVP_DigestUpdate(mdctx, buffer, file.gcount())) { EVP_MD_CTX_free(mdctx); return ""; }
     }
 
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hashLen = 0;
-    if (1 != EVP_DigestFinal_ex(mdctx, hash, &hashLen)) return "";
+    if (1 != EVP_DigestFinal_ex(mdctx, hash, &hashLen)) { EVP_MD_CTX_free(mdctx); return ""; }
 
     EVP_MD_CTX_free(mdctx);
 
@@ -209,10 +212,17 @@ fs::path repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename()
 bool runHook(const std::string& hookName) {
     fs::path hookPath = fs::path(repositoryPath) / hookName;
     if (fs::exists(hookPath) && fs::is_regular_file(hookPath)) {
-        std::string cmd = "/bin/bash '" + hookPath.string() + "'";
-        int result = std::system(cmd.c_str());
-        if (result != 0) {
-            std::cerr << hookName << " hook failed (exit code " << result << ").\n";
+        pid_t pid = fork();
+        if (pid == 0) {
+            execlp("/bin/bash", "bash", hookPath.c_str(), nullptr);
+            _exit(127);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                return true;
+            }
+            std::cerr << hookName << " hook failed (exit code " << WEXITSTATUS(status) << ").\n";
             return false;
         }
     }
@@ -230,6 +240,10 @@ void addToStaging(const std::vector<std::string>& filePaths) {
         fs::create_directory(stagingDir);
     }
     for (const auto& filePath : filePaths) {
+        if (!isPathSafe(filePath)) {
+            std::cerr << "Error: File " << filePath << " is outside the repository.\n";
+            continue;
+        }
         fs::path src = fs::absolute(filePath);
         if (!fs::exists(src)) {
             std::cerr << "Error: File " << src << " does not exist.\n";
@@ -315,6 +329,10 @@ void commitFiles(const std::vector<std::string>& filePaths, const std::string& c
     std::vector<std::string> versionPaths;
     std::vector<std::string> fileHashes;
     for (const auto& filePath : filesToCommit) {
+        if (!isPathSafe(filePath)) {
+            std::cerr << "Error: File " << filePath << " is outside the repository.\n";
+            return;
+        }
         fs::path file = fs::absolute(filePath);
 
         if (!fs::exists(file)) {
@@ -336,9 +354,19 @@ void commitFiles(const std::vector<std::string>& filePaths, const std::string& c
     }
 
     std::string timestamp = getTimestamp();
-    // Prepare commit content for hashing
+    // Prepare commit content for hashing (includes parent hash for chain integrity)
+    std::string parentHash;
+    {
+        std::ifstream logFile(repoPath / "commit_log.txt");
+        std::string lastLine;
+        while (std::getline(logFile, lastLine)) {}
+        if (!lastLine.empty()) {
+            parentHash = split(lastLine, '|')[0];
+        }
+    }
     std::ostringstream commitContent;
     commitContent << commitMessage << "|" << timestamp;
+    if (!parentHash.empty()) commitContent << "|parent=" << parentHash;
     for (size_t i = 0; i < filesToCommit.size(); ++i) {
         commitContent << "|" << fs::absolute(filesToCommit[i]).string() << "|" << fileHashes[i];
     }
@@ -396,7 +424,7 @@ void retrieveFiles(const std::string& commitMessage) {
             size_t pos3 = line.find('|', pos2 + 1);
             size_t pos4 = line.find_last_of('|');
             std::string fileData = line.substr(pos3 + 1, pos4 - pos3 - 1);
-            std::vector<std::string> tokens = splitString(fileData, '|');
+            std::vector<std::string> tokens = split(fileData, '|');
             std::vector<std::string> originalPaths, hashes;
 
             for (size_t i = 0; i + 1 < tokens.size(); i += 2) {
@@ -425,6 +453,11 @@ void rollback(const std::string &target, const std::string &commitGUID = "")
     if (repopath.empty())
     {
         std::cerr << "Error: Repository not initialized. Run 'codekeeper init'.\n";
+        return;
+    }
+
+    if (!isPathSafe(target)) {
+        std::cerr << "Error: Target " << target << " is outside the repository.\n";
         return;
     }
 
@@ -643,62 +676,6 @@ void resolveConflict(const std::string &filePath, const std::string &resolutionP
     std::cout << "Conflict resolved for " << filePath << " using " << resolutionPath << "\n";
 }
 
-
-void moveToGitRepo(const std::string &folderPath, const std::string &repoPath)
-{
-    // Ensure the source folder exists
-    if (!fs::exists(folderPath) || !fs::is_directory(folderPath))
-    {
-        std::cerr << "Error: Source folder does not exist or is not a directory.\n";
-        return;
-    }
-
-    // Ensure the destination repo folder exists
-    if (!fs::exists(repoPath))
-    {
-        std::cerr << "Error: Git repository does not exist at the specified path.\n";
-        return;
-    }
-
-    // Create a path for the folder inside the Git repo
-    std::string targetPath = repoPath + "/" + fs::path(folderPath).filename().string();
-
-    // Move the folder to the Git repository
-    try
-    {
-        fs::rename(folderPath, targetPath);
-        std::cout << "Successfully moved folder to: " << targetPath << std::endl;
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "Error: Failed to move folder. " << e.what() << std::endl;
-        return;
-    }
-
-    // Change directory to the Git repository
-    if (fs::exists(repoPath + "/.git"))
-    {
-        std::cout << "Git repository found. Proceeding with Git operations...\n";
-
-        // Change the current working directory to the Git repository
-        std::string gitCommand = "cd " + repoPath + " && git add . && git commit -m \"Added folder: " + fs::path(folderPath).filename().string() + "\"";
-        int result = std::system(gitCommand.c_str());
-
-        if (result == 0)
-        {
-            std::cout << "Successfully committed the folder to Git.\n";
-        }
-        else
-        {
-            std::cerr << "Error: Failed to commit the folder to Git.\n";
-        }
-    }
-    else
-    {
-        std::cerr << "Error: No Git repository found in the specified path.\n";
-    }
-}
-
 void archiveVersions()
 {
     loadRepositoryPath();
@@ -709,24 +686,29 @@ void archiveVersions()
         return;
     }
 
-    std::string versionsPath = repositoryPath + "/.versions";
+    std::string versionsPath = fs::path(repositoryPath).string() + "/versions";
     if (!fs::exists(versionsPath))
     {
-        std::cerr << "Error: No .versions folder found.\n";
+        std::cerr << "Error: No versions folder found.\n";
         return;
     }
 
-    std::string archivePath = repositoryPath + "/.versions_archive_" + getTimestamp() + ".zip";
+    std::string archiveName = fs::path(repositoryPath).filename().string() + "_archive_" + getTimestamp() + ".zip";
+    fs::path archivePath = fs::path(repositoryPath) / archiveName;
 
-    // Use a system call to zip the .versions folder (requires zip utility installed)
-    std::string command = "zip -r " + archivePath + " " + versionsPath;
-    if (system(command.c_str()) == 0)
-    {
-        std::cout << "Archived .versions to " << archivePath << "\n";
-    }
-    else
-    {
-        std::cerr << "Error: Failed to archive .versions folder.\n";
+    // Use fork+exec instead of system() for safety
+    pid_t pid = fork();
+    if (pid == 0) {
+        execlp("zip", "zip", "-r", archivePath.c_str(), versionsPath.c_str(), nullptr);
+        _exit(127);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            std::cout << "Archived versions to " << archivePath << "\n";
+        } else {
+            std::cerr << "Error: Failed to archive versions folder (is 'zip' installed?).\n";
+        }
     }
 }
 
@@ -840,43 +822,13 @@ void mergeBranches(const std::string &branch1, const std::string &branch2)
 }
 
 
-void convertToGitRepo(const std::string &folderPath)
-{
-    // Ensure the folder exists
-    if (!fs::exists(folderPath) || !fs::is_directory(folderPath))
-    {
-        std::cerr << "Error: Folder does not exist or is not a directory.\n";
-        return;
-    }
-
-    // Check if the folder is already a Git repository
-    if (fs::exists(folderPath + "/.git"))
-    {
-        std::cout << "This folder is already a Git repository.\n";
-        return;
-    }
-
-    // Run `git init` to initialize the folder as a Git repository
-    std::string gitCommand = "cd " + folderPath + " && git init";
-    int result = std::system(gitCommand.c_str());
-
-    if (result == 0)
-    {
-        std::cout << "Successfully converted folder to a Git repository.\n";
-    }
-    else
-    {
-        std::cerr << "Error: Failed to initialize Git repository.\n";
-    }
-}
-
 // User authentication state
 std::string currentUser;
 bool isAuthenticated = false;
 
-// Hash a password (SHA-256)
-std::string hashPassword(const std::string& password) {
-    return computeStringHash(password);
+// Hash a password (SHA-256 with salt)
+std::string hashPassword(const std::string& username, const std::string& password) {
+    return computeStringHash(username + ":" + password);
 }
 
 // Register a new user
@@ -885,7 +837,7 @@ bool registerUser(const std::string& username, const std::string& password) {
     if (repositoryPath.empty()) return false;
     std::ofstream usersFile(fs::path(repositoryPath) / ".users", std::ios::app);
     if (!usersFile.is_open()) return false;
-    usersFile << username << ":" << hashPassword(password) << "\n";
+    usersFile << username << ":" << hashPassword(username, password) << "\n";
     usersFile.close();
     return true;
 }
@@ -929,7 +881,7 @@ bool authenticateUser(const std::string& username, const std::string& password) 
     if (repositoryPath.empty()) return false;
     std::ifstream usersFile(fs::path(repositoryPath) / ".users");
     if (!usersFile.is_open()) return false;
-    std::string line, hash = hashPassword(password);
+    std::string line, hash = hashPassword(username, password);
     while (std::getline(usersFile, line)) {
         size_t sep = line.find(":");
         if (sep != std::string::npos) {
@@ -982,6 +934,7 @@ void displayHelp()
     std::cout << "  resolve [file] [res]      Resolve a conflict with the specified resolution file.\n";
     std::cout << "  archive                   Archive the .versions folder.\n";
     std::cout << "  auth                      Authenticate a user.\n";
+    std::cout << "  branch [name]             Create a new branch.\n";
     std::cout << "  merge [branch1 branch2]   Merge changes from two branches.\n";
     std::cout << "  switch [branch]           Switch to a different branch.\n";
     std::cout << "  set-remote <path>          Set the remote repository path.\n";
@@ -1284,6 +1237,12 @@ int main(int argc, char* argv[]) {
         resolveConflict(argv[2], argv[3]);
     } else if (cmd == "archive") {
         archiveVersions();
+    } else if (cmd == "branch") {
+        if (argc < 3) {
+            std::cerr << "Usage: codekeeper branch <name>" << std::endl;
+            return 1;
+        }
+        createBranch(argv[2]);
     } else if (cmd == "merge") {
         if (argc < 4) {
             std::cerr << "Usage: codekeeper merge <branch1> <branch2>" << std::endl;
