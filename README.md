@@ -8,7 +8,7 @@
 
 ## Features
 
-### 🖥Web Interface
+### Web Interface
 - **Modern dashboard** — dark-themed single-page app with tabs for Overview, Staging, Commit, History, and Branches
 - **REST API** — all operations available via JSON endpoints (auth, add, commit, rollback, branches, conflicts)
 - **Zero JS frameworks** — plain HTML/CSS/JS served by a lightweight C++ HTTP server
