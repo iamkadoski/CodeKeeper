@@ -161,24 +161,34 @@ void loadRepositoryPath() {
 }
 
 // Initialize the repository
-void initRepository(const std::string& projectName) 
+void initRepository(const std::string& projectName, bool local = false) 
 {
-    // std::string repoName = projectName.empty() ? fs::current_path().filename().string() : projectName;
-    // fs::path baseDir = fs::current_path();
-    // fs::path repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename());
+    std::regex safeName("^[a-zA-Z0-9_-]+$");
+    if (!std::regex_match(projectName, safeName)) {
+        throw std::runtime_error("Invalid project name: only letters, digits, _ and - are allowed.");
+    }
 
-fs::path baseDir = "/var/lib/CodeKeeper";  // A safer, writable location
-if (!fs::exists(baseDir)) {
-    fs::create_directories(baseDir);
-}
-
-std::regex safeName("^[a-zA-Z0-9_-]+$");
-if (!std::regex_match(projectName, safeName)) {
-    throw std::runtime_error("Invalid project name: only letters, digits, _ and - are allowed.");
-}
-
-std::string repoName = projectName.empty() ? baseDir.filename().string() : projectName;
-fs::path repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename());
+    fs::path repoPath;
+    if (local) {
+        // Create repo right in the current directory
+        repoPath = fs::weakly_canonical(fs::current_path());
+        // Check if already initialized here
+        if (fs::exists(repoPath / ".repo_path")) {
+            std::cout << "Repository already initialized in " << repoPath << std::endl;
+            repositoryPath = repoPath.string();
+            return;
+        }
+    } else {
+        fs::path baseDir = "/var/lib/CodeKeeper";
+        if (!fs::exists(baseDir)) {
+            fs::create_directories(baseDir);
+        }
+        std::string repoName = projectName.empty() ? baseDir.filename().string() : projectName;
+        repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename());
+        if (!fs::exists(repoPath)) {
+            fs::create_directory(repoPath);
+        }
+    }
 
 
     if (!fs::exists(repoPath)) {
@@ -206,7 +216,9 @@ fs::path repoPath = fs::weakly_canonical(baseDir / fs::path(repoName).filename()
     chmod((repoPath / ".users").c_str(), 0600);
 
     std::cout << "Repository '" << repositoryPath << "' initialized successfully.\n";
-    std::cout << "Change your terminal to the project folder: cd " << repositoryPath << "\n";
+    if (!local) {
+        std::cout << "Change your terminal to the project folder: cd " << repositoryPath << "\n";
+    }
 }
 // Run a hook script if it exists; return true if success, false if failed
 bool runHook(const std::string& hookName) {
@@ -228,6 +240,34 @@ bool runHook(const std::string& hookName) {
     }
     return true;
 }
+
+// Recursively collect regular files from a path (skips hidden, repo, and binary files)
+std::vector<std::string> collectFiles(const std::string& path) {
+    std::vector<std::string> files;
+    fs::path p = fs::absolute(path);
+    if (!fs::exists(p)) return files;
+    if (fs::is_regular_file(p)) {
+        files.push_back(p.string());
+    } else if (fs::is_directory(p)) {
+        for (const auto& entry : fs::recursive_directory_iterator(p)) {
+            if (fs::is_regular_file(entry)) {
+                std::string fname = entry.path().filename().string();
+                // Skip hidden files, repo internals, and the binary
+                if (fname[0] == '.' || fname == "commit_log.txt" || fname == "codekeeper" || fname == "codekeeper.exe") continue;
+                // Skip files inside repo-internal directories (.staging, versions, branches)
+                auto rel = fs::relative(entry.path(), p);
+                bool inInternal = false;
+                for (const auto& part : rel) {
+                    std::string s = part.string();
+                    if (s == ".staging" || s == "versions" || s == "branches" || s[0] == '.') { inInternal = true; break; }
+                }
+                if (!inInternal) files.push_back(fs::absolute(entry.path()).string());
+            }
+        }
+    }
+    return files;
+}
+
 // Function to add files to staging area
 void addToStaging(const std::vector<std::string>& filePaths) {
     loadRepositoryPath();
@@ -240,18 +280,16 @@ void addToStaging(const std::vector<std::string>& filePaths) {
         fs::create_directory(stagingDir);
     }
     for (const auto& filePath : filePaths) {
-        if (!isPathSafe(filePath)) {
-            std::cerr << "Error: File " << filePath << " is outside the repository.\n";
-            continue;
+        auto expanded = collectFiles(filePath);
+        for (const auto& src : expanded) {
+            if (!isPathSafe(src)) {
+                std::cerr << "Error: File " << src << " is outside the repository.\n";
+                continue;
+            }
+            fs::path dest = stagingDir / fs::path(src).filename();
+            fs::copy(src, dest, fs::copy_options::overwrite_existing);
+            std::cout << "Staged: " << src << "\n";
         }
-        fs::path src = fs::absolute(filePath);
-        if (!fs::exists(src)) {
-            std::cerr << "Error: File " << src << " does not exist.\n";
-            continue;
-        }
-        fs::path dest = stagingDir / src.filename();
-        fs::copy(src, dest, fs::copy_options::overwrite_existing);
-        std::cout << "Staged: " << src << "\n";
     }
 }
 
@@ -307,14 +345,20 @@ void commitFiles(const std::vector<std::string>& filePaths, const std::string& c
         return;
     }
 
-    // If .staging exists and is not empty, use staged files only
+    // If no files specified but staging exists and has files, use staged files
     std::vector<std::string> filesToCommit = filePaths;
     fs::path stagingDir = repoPath / ".staging";
     if (fs::exists(stagingDir)) {
         std::vector<std::string> staged = getStagedFiles();
-        if (!staged.empty()) {
+        if (!staged.empty() && filesToCommit.empty()) {
             filesToCommit = staged;
         }
+    }
+
+    if (filesToCommit.empty()) {
+        std::cerr << "Error: No files specified and no files in staging.\n";
+        std::cerr << "Usage: codekeeper commit <message> <file1> [file2 ...] or stage files first.\n";
+        return;
     }
 
     std::ifstream bypassFile(repoPath / ".bypass");
@@ -328,16 +372,22 @@ void commitFiles(const std::vector<std::string>& filePaths, const std::string& c
 
     std::vector<std::string> versionPaths;
     std::vector<std::string> fileHashes;
-    for (const auto& filePath : filesToCommit) {
+    // Expand directories to individual files
+    std::vector<std::string> expandedFiles;
+    for (const auto& fp : filesToCommit) {
+        auto collected = collectFiles(fp);
+        expandedFiles.insert(expandedFiles.end(), collected.begin(), collected.end());
+    }
+    for (const auto& filePath : expandedFiles) {
         if (!isPathSafe(filePath)) {
             std::cerr << "Error: File " << filePath << " is outside the repository.\n";
-            return;
+            continue;
         }
         fs::path file = fs::absolute(filePath);
 
         if (!fs::exists(file)) {
             std::cerr << "Error: File " << file << " does not exist.\n";
-            return;
+            continue;
         }
 
         if (std::find(ignoredFiles.begin(), ignoredFiles.end(), filePath) != ignoredFiles.end()) {
@@ -354,6 +404,15 @@ void commitFiles(const std::vector<std::string>& filePaths, const std::string& c
     }
 
     std::string timestamp = getTimestamp();
+
+    // Use expanded file list for commit, not original paths
+    filesToCommit = expandedFiles;
+
+    if (filesToCommit.empty()) {
+        std::cerr << "Error: No valid files to commit (all rejected or not found).\n";
+        return;
+    }
+
     // Prepare commit content for hashing (includes parent hash for chain integrity)
     std::string parentHash;
     {
@@ -922,7 +981,7 @@ void displayHelp()
 {
     std::cout << "CodeKeeper Help:\n";
     std::cout << "Available Commands:\n";
-    std::cout << "  init                      Initialize a new repository.\n";
+    std::cout << "  init <name> [--local]     Initialize a new repository (--local creates in current dir).\n";
     std::cout << "  add [files]               Add files to staging area.\n";
     std::cout << "  reset [files]             Remove files from staging area.\n";
     std::cout << "  status                    Show status of working directory and staging area.\n";
@@ -944,6 +1003,7 @@ void displayHelp()
     std::cout << "  whoami                      Show current authenticated user.\n";
     std::cout << "  list-users                  List all registered users.\n";
     std::cout << "  merge-files <f1> <f2> <out> [--interactive]  Merge two files, optionally interactively.\n";
+    std::cout << "  serve [port] [--dir <path>]  Start web interface.\n";
     std::cout << "\nAuthentication:\n";
     std::cout << "  Users must authenticate using a valid username and password.\n";
     std::cout << "  Only authenticated users can commit, rollback, or resolve conflicts.\n";
@@ -1147,10 +1207,11 @@ int main(int argc, char* argv[]) {
     std::string cmd = argv[1];
     if (cmd == "init") {
         if (argc < 3) {
-            std::cerr << "Usage: codekeeper init <projectName>\n";
+            std::cerr << "Usage: codekeeper init <projectName> [--local]\n";
             return 1;
         }
-        initRepository(argv[2]);
+        bool local = (argc > 3 && std::string(argv[3]) == "--local");
+        initRepository(argv[2], local);
     } else if (cmd == "auth") {
         if (argc < 3) {
             std::cerr << "Usage: codekeeper auth <register|login|logout> [username] [password]\n";
@@ -1185,8 +1246,8 @@ int main(int argc, char* argv[]) {
         }
     } else if (cmd == "commit") {
         if (!requireAuth()) return 1;
-        if (argc < 4) {
-            std::cerr << "Usage: codekeeper commit <message> <file1> [file2 ...]" << std::endl;
+        if (argc < 3) {
+            std::cerr << "Usage: codekeeper commit <message> [file1 file2 ...]" << std::endl;
             return 1;
         }
         std::string message = argv[2];
@@ -1293,6 +1354,50 @@ int main(int argc, char* argv[]) {
             interactiveMerge(argv[2], argv[3], argv[4]);
         } else {
             mergeFiles(argv[2], argv[3], argv[4]);
+        }
+    } else if (cmd == "serve") {
+        // Launch web server binary
+        fs::path exePath = fs::absolute(argv[0]);
+        fs::path webExe = exePath.parent_path() / "codekeeper-web";
+        if (!fs::exists(webExe)) {
+            webExe = exePath.parent_path() / "build/codekeeper-web";
+        }
+        if (!fs::exists(webExe)) {
+            std::cerr << "Error: codekeeper-web not found. Build it with: g++ -std=c++17 -Iinclude -o build/codekeeper-web codekeeper-web.cpp -lssl -lcrypto -lpthread" << std::endl;
+            return 1;
+        }
+        std::string port = (argc > 2) ? argv[2] : "8080";
+        if (port == "--help" || port == "-h") {
+            std::cout << "Usage: codekeeper serve [port]" << std::endl;
+            std::cout << "  port   HTTP port (default: 8080)" << std::endl;
+            return 0;
+        }
+        // Ensure web directory is accessible
+        fs::path webDir = exePath.parent_path() / "web";
+        if (!fs::exists(webDir / "index.html")) {
+            webDir = exePath.parent_path().parent_path() / "web";
+        }
+        if (!fs::exists(webDir / "index.html")) {
+            // Try CWD/web
+            webDir = fs::current_path() / "web";
+        }
+        if (fs::exists(webDir / "index.html")) {
+            std::cout << "Starting CodeKeeper Web Server..." << std::endl;
+            std::cout << "Open http://localhost:" << port << " in your browser." << std::endl;
+            std::cout << "Press Ctrl+C to stop." << std::endl << std::endl;
+            // Use exec to replace process, passing --web and --dir
+            execlp(webExe.c_str(), webExe.c_str(),
+                port.c_str(),
+                "--dir", fs::current_path().c_str(),
+                "--web", webDir.c_str(),
+                nullptr);
+            // If exec fails, fall back to system()
+            std::cerr << "Error: Failed to launch web server." << std::endl;
+            return 1;
+        } else {
+            std::cerr << "Error: web/index.html not found. Run from the CodeKeeper project directory." << std::endl;
+            std::cerr << "Alternatively, run: codekeeper-web <port> --web <path-to-web-dir>" << std::endl;
+            return 1;
         }
     } else {
         displayHelp();
